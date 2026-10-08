@@ -1,0 +1,89 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>LoopScope · phone bench</title>
+<style>
+body{font:15px -apple-system,system-ui,sans-serif;margin:0;padding:16px;background:#0d1117;color:#e6edf3}
+h1{font-size:19px;margin:0 0 4px}.mut{color:#8b949e;font-size:13px}
+button{font:inherit;font-size:17px;padding:14px 18px;border-radius:10px;border:0;background:#238636;color:#fff;width:100%;margin:12px 0}
+button:disabled{background:#30363d}
+table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums;font-size:13px;margin:8px 0}
+td,th{border-bottom:1px solid #30363d;padding:5px 3px;text-align:right}td:first-child,th:first-child{text-align:left}
+.ok{color:#7ee787}.bad{color:#f85149}pre{white-space:pre-wrap;font-size:11px;color:#8b949e}
+progress{width:100%;height:10px}
+</style></head><body>
+<h1>LoopScope · phone bench</h1>
+<div class="mut">Measures what a looped model would cost on this phone: weight-read speed for 1–8 tokens at once (the WaveFront idea), the fixed cost of GPU calls, and heat over a sustained 60 s load. Every result is checked for correctness. Keep the screen on; takes ~2 min. Nothing leaves the phone unless you tap Share.</div>
+<button id="go">Start</button>
+<progress id="pg" value="0" max="1"></progress>
+<div id="out"></div>
+<button id="share" style="display:none;background:#1f6feb">Copy results</button>
+<pre id="log"></pre>
+<script>
+const $=s=>document.querySelector(s),med=a=>a.slice().sort((x,y)=>x-y)[a.length>>1];
+const U=(n,f)=>Array.from({length:n},(_,i)=>f(i)).join('\n');
+const log=m=>{$('#log').textContent+=m+'\n';};
+const R={v:2,ua:navigator.userAgent,when:new Date().toISOString(),screen:[screen.width,screen.height,devicePixelRatio]};
+const COLS=2048,ROWS=16384;
+const kernel=B=>`enable f16;
+@group(0) @binding(0) var<storage,read> w: array<vec4<f16>>;
+@group(0) @binding(1) var<storage,read> x: array<vec4<f16>>;
+@group(0) @binding(2) var<storage,read_write> y: array<f32>;
+@compute @workgroup_size(64) fn main(@builtin(global_invocation_id) g: vec3u){
+  let row=g.x; if(row>=${ROWS}u){return;}
+  ${U(B,b=>`var a${b}=0.0;`)}
+  for(var c=0u;c<${COLS/4}u;c++){ let wv=vec4<f32>(w[row*${COLS/4}u+c]);
+    ${U(B,b=>`a${b}+=dot(wv,vec4<f32>(x[${b*COLS/4}u+c]));`)} }
+  ${U(B,b=>`y[${b*ROWS}u+row]=a${b};`)}
+}`;
+async function dev(){const ad=await navigator.gpu.requestAdapter({powerPreference:'high-performance'});
+  return ad.requestDevice({requiredFeatures:['shader-f16'],requiredLimits:{maxStorageBufferBindingSize:ad.limits.maxStorageBufferBindingSize,maxBufferSize:ad.limits.maxBufferSize}})}
+async function setup(B){
+  const d=await dev();
+  const W=d.createBuffer({size:ROWS*COLS*2,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
+  const w16=new Uint16Array(ROWS*COLS);let s=12345;for(let i=0;i<w16.length;i++){s=(s*1103515245+12345)>>>0;w16[i]=0x2000|((s>>>16)&0x0fff)|((s&1)<<15)}
+  d.queue.writeBuffer(W,0,w16);
+  const X=d.createBuffer({size:B*COLS*2,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
+  const xh=new Uint16Array(B*COLS),hv=[0x3c00,0x4000,0x4200,0x4400,0x4500,0x4600,0x4700,0x4800];
+  for(let b=0;b<B;b++)xh.fill(hv[b],b*COLS,(b+1)*COLS);d.queue.writeBuffer(X,0,xh);
+  const Y=d.createBuffer({size:B*ROWS*4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
+  const RB=d.createBuffer({size:B*ROWS*4,usage:GPUBufferUsage.MAP_READ|GPUBufferUsage.COPY_DST});
+  const p=await d.createComputePipelineAsync({layout:'auto',compute:{module:d.createShaderModule({code:kernel(B)}),entryPoint:'main'}});
+  const bg=d.createBindGroup({layout:p.getBindGroupLayout(0),entries:[W,X,Y].map((b,i)=>({binding:i,resource:{buffer:b}}))});
+  const run=async n=>{const e=d.createCommandEncoder(),ps=e.beginComputePass();ps.setPipeline(p);ps.setBindGroup(0,bg);
+    for(let i=0;i<n;i++)ps.dispatchWorkgroups(ROWS/64);ps.end();d.queue.submit([e.finish()]);const t=performance.now();await d.queue.onSubmittedWorkDone();return (performance.now()-t)/n};
+  const h2f=h=>{const sg=h>>15?-1:1,ex=(h>>10)&31,m=h&1023;return ex===0?sg*m*2**-24:sg*(1+m/1024)*2**(ex-15)};
+  const ck=[];for(let k=0;k<128;k++)ck.push((k*127)%ROWS);
+  const ref=ck.map(r=>{let a=0;for(let c=0;c<COLS;c++)a+=h2f(w16[r*COLS+c]);return a});
+  const check=async()=>{d.queue.writeBuffer(Y,0,new Float32Array(B*ROWS));await run(1);const e=d.createCommandEncoder();e.copyBufferToBuffer(Y,0,RB,0,B*ROWS*4);d.queue.submit([e.finish()]);
+    await RB.mapAsync(GPUMapMode.READ);const y=new Float32Array(RB.getMappedRange().slice(0));RB.unmap();
+    let bad=0;for(let b=0;b<B;b++)ck.forEach((r,k)=>{const want=(b+1)*ref[k];if(!(Math.abs(y[b*ROWS+r]-want)<=2e-2*(1+Math.abs(want))))bad++});return bad};
+  return {d,run,check};
+}
+async function main(){
+  if(!navigator.gpu){$('#out').innerHTML='<p class="bad">WebGPU not available in this browser.</p>';return}
+  const steps=4*3+1;let st=0;const tick=()=>$('#pg').value=(++st)/steps;
+  R.batch={};
+  for(let rep=0;rep<3;rep++)for(const B of (rep%2?[8,4,2,1]:[1,2,4,8])){
+    const S=await setup(B);await S.run(3);const ts=[];for(let i=0;i<7;i++)ts.push(await S.run(10));const bad=await S.check();S.d.destroy();
+    (R.batch[B]=R.batch[B]||[]).push({ms:med(ts),bad});log(`B=${B} ${med(ts).toFixed(3)} ms bad=${bad}`);tick();
+  }
+  // sustained: 60 s of B=1 weight streaming, sampled every ~2 s (thermal throttling shows as rising ms)
+  const S=await setup(1);await S.run(3);R.sustained=[];const t0=performance.now();
+  while(performance.now()-t0<60000){R.sustained.push([+((performance.now()-t0)/1000).toFixed(1),+(await S.run(40)).toFixed(3)]);$('#pg').value=(st+(performance.now()-t0)/60000)/steps}
+  R.sustained_bad=await S.check();S.d.destroy();tick();
+  const v=B=>{const xs=R.batch[B].filter(r=>!r.bad).map(r=>r.ms);return xs.length?med(xs):NaN};
+  const b1=v(1),gb=b=>ROWS*COLS*2/b/1e6;
+  const first=med(R.sustained.slice(0,5).map(x=>x[1])),last=med(R.sustained.slice(-5).map(x=>x[1]));
+  R.summary={b1_ms:b1,gbs:gb(b1),rel:{2:v(2)/b1,4:v(4)/b1,8:v(8)/b1},throttle:last/first};
+  const allok=Object.values(R.batch).flat().every(r=>!r.bad)&&!R.sustained_bad;
+  $('#out').innerHTML=`<table><tr><th>tokens per weight read</th><th>ms</th><th>vs 1 token</th><th>work per ms</th></tr>
+  ${[1,2,4,8].map(B=>`<tr><td>${B}</td><td>${v(B).toFixed(2)}</td><td>${(v(B)/b1).toFixed(2)}×</td><td>${(B*b1/v(B)).toFixed(2)}×</td></tr>`).join('')}</table>
+  <p>Weight read speed: <b>${gb(b1).toFixed(1)} GB/s</b> (simple kernel). Sustained 60 s: ${first.toFixed(2)} → ${last.toFixed(2)} ms (${((last/first-1)*100).toFixed(0)}% ${last>first?'slower — throttling':'change'}).</p>
+  <p class="${allok?'ok':'bad'}">${allok?'All outputs verified correct.':'Some outputs were WRONG — numbers above are not trustworthy.'}</p>
+  <p class="mut">Projected Ouro-1.4B f16 decode: ${(1000/(4*(24*(4*2048*2048+3*2048*5632)*2)/gb(b1)/1e6)).toFixed(1)} tokens/s at 4 loops; WaveFront ideal ×${(4/(R.summary.rel[4]*1)).toFixed(1)}.</p>`;
+  R.done=new Date().toISOString();
+  localStorage.setItem('loopscope_bench_'+R.done,JSON.stringify(R));$('#share').style.display='block';
+}
+$('#go').onclick=async()=>{$('#go').disabled=true;$('#go').textContent='Running… keep screen on';try{await main();$('#go').textContent='Done ✓'}catch(e){log('ERR '+e.message);$('#go').textContent='Error'}};
+$('#share').onclick=async()=>{const t=JSON.stringify(R);try{await navigator.clipboard.writeText(t);$('#share').textContent='Copied ✓ — paste into Minis'}catch(e){$('#log').textContent=t}};
+</script></body></html>
