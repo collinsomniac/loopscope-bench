@@ -22,7 +22,7 @@ progress{width:100%;height:10px}
 const $=s=>document.querySelector(s),med=a=>a.slice().sort((x,y)=>x-y)[a.length>>1];
 const U=(n,f)=>Array.from({length:n},(_,i)=>f(i)).join('\n');
 const log=m=>{$('#log').textContent+=m+'\n';};
-const R={v:2,ua:navigator.userAgent,when:new Date().toISOString(),screen:[screen.width,screen.height,devicePixelRatio]};
+const R={v:3,ua:navigator.userAgent,when:new Date().toISOString(),screen:[screen.width,screen.height,devicePixelRatio]};
 const COLS=2048,ROWS=16384;
 const kernel=B=>`enable f16;
 @group(0) @binding(0) var<storage,read> w: array<vec4<f16>>;
@@ -60,11 +60,12 @@ async function setup(B){
   return {d,run,check};
 }
 async function main(){
+  {let a=performance.now(),b,m=1e9;for(let i=0;i<2e5;i++){b=performance.now();if(b>a){m=Math.min(m,b-a);a=b}}R.timer_res_ms=m;R.isolated=self.crossOriginIsolated;}
   if(!navigator.gpu){$('#out').innerHTML='<p class="bad">WebGPU not available in this browser.</p>';return}
   const steps=4*3+1;let st=0;const tick=()=>$('#pg').value=(++st)/steps;
   R.batch={};
   for(let rep=0;rep<3;rep++)for(const B of (rep%2?[8,4,2,1]:[1,2,4,8])){
-    const S=await setup(B);await S.run(3);const ts=[];for(let i=0;i<7;i++)ts.push(await S.run(10));const bad=await S.check();S.d.destroy();
+    const S=await setup(B);await S.run(3);const ts=[];for(let i=0;i<7;i++)ts.push(await S.run(50));const bad=await S.check();S.d.destroy();
     (R.batch[B]=R.batch[B]||[]).push({ms:med(ts),bad});log(`B=${B} ${med(ts).toFixed(3)} ms bad=${bad}`);tick();
   }
   // sustained: 60 s of B=1 weight streaming, sampled every ~2 s (thermal throttling shows as rising ms)
@@ -78,7 +79,7 @@ async function main(){
   const allok=Object.values(R.batch).flat().every(r=>!r.bad)&&!R.sustained_bad;
   $('#out').innerHTML=`<table><tr><th>tokens per weight read</th><th>ms</th><th>vs 1 token</th><th>work per ms</th></tr>
   ${[1,2,4,8].map(B=>`<tr><td>${B}</td><td>${v(B).toFixed(2)}</td><td>${(v(B)/b1).toFixed(2)}×</td><td>${(B*b1/v(B)).toFixed(2)}×</td></tr>`).join('')}</table>
-  <p>Weight read speed: <b>${gb(b1).toFixed(1)} GB/s</b> (simple kernel). Sustained 60 s: ${first.toFixed(2)} → ${last.toFixed(2)} ms (${((last/first-1)*100).toFixed(0)}% ${last>first?'slower — throttling':'change'}).</p>
+  <p class="mut">Clock resolution ${R.timer_res_ms.toFixed(3)} ms (browsers coarsen timers on normal pages; each sample averages 50 GPU calls). Close screen recording and other apps for clean numbers.</p><p>Weight read speed: <b>${gb(b1).toFixed(1)} GB/s</b> (simple kernel). Sustained 60 s: ${first.toFixed(2)} → ${last.toFixed(2)} ms (${((last/first-1)*100).toFixed(0)}% ${last>first?'slower — throttling':'change'}).</p>
   <p class="${allok?'ok':'bad'}">${allok?'All outputs verified correct.':'Some outputs were WRONG — numbers above are not trustworthy.'}</p>
   <p class="mut">Projected Ouro-1.4B f16 decode: ${(1000/(4*(24*(4*2048*2048+3*2048*5632)*2)/gb(b1)/1e6)).toFixed(1)} tokens/s at 4 loops; WaveFront ideal ×${(4/(R.summary.rel[4]*1)).toFixed(1)}.</p>`;
   R.done=new Date().toISOString();
